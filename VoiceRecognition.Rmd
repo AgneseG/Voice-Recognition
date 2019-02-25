@@ -1,0 +1,271 @@
+---
+title: "Voice recognition"
+author: "Agnese Giacomello"
+output: html_document
+---
+```{r, include=FALSE}
+setwd("~/Desktop/Data Visualisation/6078249_assignment_prediction")
+
+library(GGally)
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(broom)
+library(randomForest)
+library(data.table)
+library(lemon)
+```
+My model is based on the dataset **'Gender Recognition by Voice'** which consists of 3168 voice samples, half from females and half from males.
+
+The original $.wave$ files have previously been processed in R and are presented as a $.csv$ file with 20 variables, which reflect the frequency parameters of the recorded voices.
+An extra variable is added ($label$), which corresponds to the sex binary label (male/female). 
+
+The goal of my analysis is to build a model that will predict the gender based on the 20 frequency-related variables (binary classification).
+
+These are:
+
+*  meanfreq: mean frequency (in kHz)
+
+*   sd: standard deviation of frequency
+
+*   median: median frequency (in kHz)
+
+*   Q25: first quantile (in kHz)
+
+*   Q75: third quantile (in kHz)
+
+*  IQR: interquantile range (in kHz)
+
+*   skew: skewness (see note in specprop description)
+
+*   kurt: kurtosis (see note in specprop description)
+
+*  sp.ent: spectral entropy
+
+*   sfm: spectral flatness
+
+* mode: mode frequency
+
+* centroid: frequency centroid (see specprop)
+
+* peakf: peak frequency (frequency with highest energy)
+
+* meanfun: average of fundamental frequency measured across acoustic signal
+
+* minfun: minimum fundamental frequency measured across acoustic signal
+
+* maxfun: maximum fundamental frequency measured across acoustic signal
+
+* meandom: average of dominant frequency measured across acoustic signal
+
+* mindom: minimum of dominant frequency measured across acoustic signal
+
+* maxdom: maximum of dominant frequency measured across acoustic signal
+
+* dfrange: range of dominant frequency measured across acoustic signal
+
+* modindx: modulation index. Calculated as the accumulated absolute difference between adjacent measurements of fundamental frequencies divided by the frequency range
+
+
+```{r setup}
+
+voices <- read.csv("voice.csv")
+
+# Checking structure of the dataset
+str(voices) 
+knit_print.table <- lemon_print    # Tool for prettier dataframe printing
+summary(voices)
+```
+
+```{r}
+sapply(voices, FUN = function(col) sum(is.na(col))) # Double checking presence of missing values
+```
+
+### Some data screening
+
+I first performed some data screening:
+I plotted boxplots and density distributions for each of the 20 variables to investigate whether their distribution was different between males and females. 
+Also, a plot with the Pearson correlations is reported to check possible presence of multicollinearity among the variabels. 
+
+```{r}
+# Reshape the data in long format to ease plotting
+voices_long <- voices %>%
+    gather('feature', 'value', -label)
+
+head(voices_long)
+```
+
+```{r}
+voices_long %>%
+    ggplot(aes(label, value, colour = label)) + 
+        geom_boxplot(alpha = 0.5) + 
+        facet_wrap(~ feature, scales='free_y', nrow=4) + 
+        labs(x = NULL, y = NULL) + 
+        theme_minimal()
+```
+
+```{r}
+voices_long %>%
+    ggplot(aes(value, fill = label)) + 
+        geom_density(alpha = 0.5) + 
+        facet_wrap(~ feature, scales='free', nrow=4) + 
+        labs(x = NULL, y = NULL) + 
+        theme_minimal() 
+```
+
+
+The variables **meanfun, IQR, Q25, sd, mode, sfm** and **sp.ent** appear to have very different distributions among male and females, therefore I would expect them to be relevant variables in the classification model.
+
+
+```{r}
+voices %>% 
+  select_if(is.numeric) %>%
+  ggcorr(geom="circle") 
+```
+
+
+Some very high correlations are present (e.g. among *spectral entropy* and *spectral flatness*, *frequency centroid* and *mean frequency*, etc.).
+
+Even though they represent different characteristics of the human voice, they refer to the same feature: their values are therefore linearly related, which causes high correlations to be present. This might cause multicollinearity problems when performing logistic regression.
+
+### Predictions
+
+To build a classsification model that predicts gender, I first performed a **classic logistic regression** and then a **random forest** algorithm.
+
+```{r}
+# Train / Test split 70%-30%
+set.seed(1231)
+idx <- seq(nrow(voices))
+idx_train <- sample(idx, size = floor(nrow(voices) * 0.7), replace = FALSE)
+idx_test <- idx[!idx %in% idx_train]
+
+train_data  <- voices[idx_train,]
+test_data <- voices[idx_test,]
+
+dim(train_data) # Checking correct division
+dim(test_data)
+```
+```{r}
+train_data <- train_data %>% 
+  dplyr::mutate(sex = factor(ifelse(label == 'male', 1, 0))) %>% # Creating a dichotomous variable 0/1 to ease comprison after the model fitting
+  select(-label)
+
+test_data <- test_data %>% 
+  dplyr::mutate(sex = factor(ifelse(label == 'male', 1, 0))) %>% # Creating a dichotomous variable 0/1 to ease comprison after the model fitting
+  select(-label)
+```
+
+#### Logistic regression
+
+```{r}
+logistic_regression_model <- glm(sex ~ ., data = train_data, family = binomial)
+summary(logistic_regression_model)
+```
+
+```{r}
+# Adds a column with predictions and SE to the dataset
+augment(logistic_regression_model, newdata = test_data, type.predict = "response") %>% 
+    head()
+```
+
+```{r} 
+# Confusion matrix
+augment(logistic_regression_model, type.predict = "response") %>% 
+    mutate(predictions_logistic = round(.fitted)) %>% # Rounding so to have 0/1 predictions
+    select(sex, predictions_logistic) %>%
+    table()
+
+accuracy_logistic_regression <- (1084+1076)/(1084+1076+25+32)
+accuracy_logistic_regression
+```
+
+The logistic regression model showed Q25, sfm, meanfun, minfun, sp.ent and Q75 as significant variables, at a significance level of $\alpha=0.05$. 
+
+In particular, coefficients can be interpreted as follows:
+
+* holding all other variables constant, the odds of the voice being male are exp(-54.38) = 2.415828e-24 times higher with a one unit increase in Q25 (the first quantile, in kHz).
+
+* holding all other variables constant, the odds of the voice being male are exp(6.200e+01) = 8.438357e+26 times higher with a one unit increase in Q75 (the third quantile, in kHz). 
+
+* holding all other variables constant, the odds of the voice being male are exp(-1.132e+01) = 1.212792e-05 times higher with a one unit increase in spectral flatness.
+
+* holding all other variables constant, the odds of the voice being male are exp(-1.668e+02) = 3.62811e-73 times higher with a one unit increase in meanfun. 
+
+*  holding all other variables constant, the odds of the voice being male are exp(3.347e+01) = 3.434285e+14 times higher with a one unit increase in minfun. 
+
+* holding all other variables constant, the odds of the voice being male are exp(6.200e+01) = 8.438357e+26 times higher with a one unit increase in Q75. 
+
+As was anticipated in the data screening, the high correlations found in variables that express different characteristics of the same features caused logistic regression to detect singularities (= linear relations among variabels). When detecting perfectly linear relations among two variables, R automatically includes only one of the two in the analysis.
+
+
+The logistic model tested on the 30% test data gives a 97.43% accuracy, which is already high. 
+
+I'll compare its performance to a random forest algorithm on the same variables.
+
+### Random forest
+
+```{r}
+set.seed(7)
+random_forest <- randomForest(factor(train_data$sex) ~ ., data = train_data, ntree= 300)
+
+random_forest
+
+# vector of predictions on the test data (0/1)
+set.seed(21)
+prediction_randomforest <- predict(random_forest, test_data)
+```
+
+```{r}
+# Confusion matrix
+table(test_data$sex, prediction_randomforest)
+```
+
+```{r}
+accuracy_randomforest <- (453+474)/(455+474+9+15)
+accuracy_randomforest
+```
+
+```{r, fig.show='hide'}
+# Checking error distribution along trees for the two classes 
+OOB = as.data.table(plot(random_forest)) # OOB: out-of-bag
+
+OOB[, trees := .I]
+```
+
+
+```{r}
+# Transform to long format to ease plotting
+OOB_long = melt(OOB, id.vars = "trees")
+setnames(OOB_long, "value", "error")
+
+ggplot(data = OOB_long, aes(x = trees, y = error, color = variable)) + geom_line()
+```
+
+
+The accuracy of the random forest algorithm is 97.27%, therefore it performs slighly worse than logistic regression (97.43% accuracy).
+
+As we can notice from the plot above, where error rates are plotted at each tree, the algorithm was better able to classify females (0) than males (1). 
+Given the nature of the random forest algorithm, it is not possible to give a direct interpretation of how variables contribute to the gender prediction as for the parameters in logistic regression. 
+I therefore did investigate which variables were contribuiting the most to the sex predictions based on the $importance$ function, which assesses variables' importance based on the error rate computed on permutations of the OOB (out-of-bag) data at each tree.
+
+```{r}
+importance    <- importance(random_forest)
+importance_dataframe <- data.frame(Variables = row.names(importance), 
+                            Importance = round(importance[ ,'MeanDecreaseGini'],2))
+
+# Rank variable
+importance_rank <- importance_dataframe %>%
+  mutate(Rank = paste0('#',dense_rank(desc(importance))))
+
+# Visualisation of the importance of variables
+ggplot(importance_rank, aes(x = reorder(Variables, Importance), 
+    y = Importance, fill = Importance)) +
+  geom_bar(stat='identity') +
+  labs(x = 'Variables') +
+  coord_flip()
+```
+
+We see how *meanfun* had the biggest contribution in the voice classification, followed by *IQR, Q25, sd* and *sp.ent*. 
+
+Looking back at the data screeining, I noticed how these were actually the variables that had a very different distribution among males and females in the original data. As I previously stated, it makes sense that these are the variables that had a big role in the sex prediction both in logistic regression and random forest.
+
